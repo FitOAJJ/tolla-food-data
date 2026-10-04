@@ -1,0 +1,74 @@
+# The monthly food packs (Batch UK). Builds from Open Food Facts' export on GitHub's servers, then:
+#   - replaces the `pages` branch with this month's files (Cloudflare Pages publishes that branch at
+#     https://foods.tolla.co.uk); the branch holds one month only, so the repo stays small;
+#   - attaches the files to a release, which keeps every month (the public copy the ODbL asks for).
+# A pack that shrinks by more than 10 % stops the build and last month's files stay live (unless run with force).
+name: Monthly food packs
+
+on:
+  schedule:
+    - cron: '17 3 2 * *' # 03:17 UTC on the 2nd of each month
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish even if a pack shrank by more than 10 %
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: food-packs
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Last month's packs (for the safety check)
+        run: |
+          mkdir -p public
+          if git ls-remote --exit-code --heads origin pages >/dev/null; then
+            git fetch --depth=1 origin pages
+            git --work-tree=public checkout FETCH_HEAD -- .
+            git reset -q
+          fi
+
+      - name: Build
+        run: npx --yes tsx@4.23.1 tools/food-pack/buildFoodPack.ts --countries gb --out public ${{ inputs.force && '--force' || '' }}
+
+      - name: Site files
+        run: cp site/index.html site/_headers public/
+
+      - name: Publish to the pages branch
+        run: |
+          cd public
+          rm -rf .git
+          git init -q -b pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Food packs $(date -u +%Y-%m)"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release (keeps every month)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="packs-$(date -u +%Y-%m)"
+          notes="Food packs built $(date -u +%Y-%m-%d) from the Open Food Facts export. Contains information from Open Food Facts, made available under the ODbL v1.0; these files are likewise made available under the ODbL v1.0."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" public/foods-* public/manifest.json --clobber
+          else
+            gh release create "$tag" public/foods-* public/manifest.json --title "Food packs $(date -u +%Y-%m)" --notes "$notes"
+          fi

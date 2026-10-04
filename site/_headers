@@ -1,0 +1,7 @@
+/manifest.json
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/foods-*
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/octet-stream

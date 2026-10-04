@@ -4,9 +4,14 @@ Packaged-food nutrition, built once a month from [Open Food Facts](https://world
 
 ## What is here
 
-- `scripts/`: the build, which reads Open Food Facts' public export and keeps products with a valid barcode, a name and complete nutrition per 100 g or 100 ml.
-- `public/`: what the app downloads. One SQLite file per country and a `manifest.json` (month, product count, size, checksum). It is published at `https://foods.tolla.co.uk`.
-- `.github/workflows/`: the monthly build.
+- : the build. It reads Open Food Facts' public export as it downloads and keeps each country's products that have a valid barcode, a name and complete nutrition per 100 g or 100 ml.
+- : the Tolla server's own cleaning code (names, servings, nutrients, the calorie check), so a product in a pack matches the same product scanned in the app. Copied from the app's repository, which is the source of truth.
+- : the two small files published with the packs.
+- : the monthly build. It publishes this month's files on the  branch, which Cloudflare Pages serves at , and keeps every month as a release.
+
+What the app downloads: one SQLite file per country () and  (month, product count, size, checksum).
+
+Run it yourself:  (Node 24).
 
 ## Licence and credit
 
