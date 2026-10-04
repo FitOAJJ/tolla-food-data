@@ -2,3 +2,8 @@ node_modules/
 *.csv
 *.csv.gz
 *.tmp
+# Built packs live only on the pages branch and in releases, never on main.
+public/
+*.db
+*.db-journal
+*.db.part*
