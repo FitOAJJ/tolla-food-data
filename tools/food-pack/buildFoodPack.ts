@@ -160,6 +160,8 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     const capped = capByScans(t.db, args.cap);
     finish(t.db);
     const trimmed = fitToSize(t.db, t.path, args.maxBytes ?? MAX_FILE_BYTES);
+    // A stale or broken index fails here ("database disk image is malformed") and stops the build.
+    t.db.exec("insert into products_fts (products_fts, rank) values ('integrity-check', 1)");
     const dropped = capped + trimmed;
     const products = Number((t.db.prepare('select count(*) as n from products').get() as { n: number }).n);
     const meta = t.db.prepare('insert into meta (key, value) values (?, ?)');

@@ -65,7 +65,7 @@ export const PACK_TABLE_SQL = `create table products (
 )`;
 
 /**
- * The search index, built by the job (checked readable by SQLite 3.49.1, the phone's version, 4 Oct). External
+ * The search index, built by the job (checked readable by SQLite 3.49.1, older than the phone's 3.50.3, 4 Oct). External
  * content: the index points at products' rows instead of storing the text again. detail=column keeps it small and
  * still supports single-word and prefix matches with per-column weights.
  */
