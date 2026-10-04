@@ -9,10 +9,7 @@
  * 105 g, over 900 kcal), which in crowd-sourced data means a typo, not a food.
  */
 import {
-  buildOffMicros,
-  buildOffServingSizes,
   detectBaseUnit,
-  parseOffServing,
   sanitizeCatalogText,
   sanitizeProductName,
   MAX_CATALOG_NAME,
@@ -21,22 +18,25 @@ import {
 import { sanitizeCalories } from '../../supabase/functions/_shared/nutrientValidation';
 import { gtinCheckDigitOk } from '../../supabase/functions/_shared/foodLookup';
 
-/** Bump when the pack's table changes; the app ignores a pack whose schema it doesn't know. */
-export const PACK_SCHEMA = 1;
+/**
+ * Bump when the pack's table changes; the app ignores a pack whose schema it doesn't know. 2 (hotfix, 4 Oct): slim
+ * columns and the search index built here, not on the phone (schema 1's on-phone join and index build crashed the app).
+ */
+export const PACK_SCHEMA = 2;
 
 /** The export's columns the build reads (it has 211; checked 4 Oct). Everything else is skipped while streaming. */
 export const PACK_COLUMNS = [
   'code', 'product_name', 'brands', 'quantity', 'serving_size', 'serving_quantity', 'countries_tags',
   'categories_tags', 'unique_scans_n',
-  'energy-kcal_100g', 'proteins_100g', 'carbohydrates_100g', 'fat_100g', 'fiber_100g', 'saturated-fat_100g',
-  'sugars_100g', 'salt_100g', 'sodium_100g',
-  'calcium_100g', 'iron_100g', 'magnesium_100g', 'potassium_100g', 'zinc_100g', 'vitamin-a_100g', 'vitamin-c_100g',
-  'vitamin-d_100g', 'vitamin-e_100g', 'vitamin-b12_100g', 'vitamin-pp_100g', 'pantothenic-acid_100g',
-  'vitamin-b6_100g', 'folates_100g', 'vitamin-b9_100g',
+  'energy-kcal_100g', 'proteins_100g', 'carbohydrates_100g', 'fat_100g',
 ] as const;
 
 export type OffRow = Partial<Record<(typeof PACK_COLUMNS)[number], string>>;
 
+/**
+ * What search shows, and nothing more: logging a product saves the full food through Tolla's server (servings,
+ * fiber, micronutrients come from there), so the pack stays a small single download.
+ */
 export type PackProduct = {
   barcode: string;
   name: string;
@@ -46,21 +46,14 @@ export type PackProduct = {
   protein: number;
   carbs: number;
   fat: number;
-  fiber: number;
-  satFat: number | null;
-  sugars: number | null;
-  salt: number | null;
-  /** Named portions as JSON, exactly as the catalog stores them (`{"g":100,"serving":30,"slice":30}`). */
-  servingSizes: string;
-  /** Catalog micro keys, as JSON (`{"calcium_mg":120}`), per 100 g/ml. */
-  micros: string;
-  /** Open Food Facts' scan count: how often people look this product up. Ranks search and caps big countries. */
+  /** Open Food Facts' scan count: how often people look this product up. Ranks search and decides what's kept. */
   scans: number;
 };
 
-/** The table the app reads. WITHOUT ROWID on the barcode: no separate barcode index needed. */
+/** The table the app reads (a rowid table, so the search index can point into it without copying the text). */
 export const PACK_TABLE_SQL = `create table products (
-  barcode text primary key,
+  id integer primary key,
+  barcode text not null unique,
   name text not null,
   brand text,
   unit text not null check (unit in ('g', 'ml')),
@@ -68,14 +61,17 @@ export const PACK_TABLE_SQL = `create table products (
   protein real not null,
   carbs real not null,
   fat real not null,
-  fiber real not null,
-  sat_fat real,
-  sugars real,
-  salt real,
-  serving_sizes text not null,
-  micros text not null,
   scans integer not null
-) without rowid`;
+)`;
+
+/**
+ * The search index, built by the job (checked readable by SQLite 3.49.1, the phone's version, 4 Oct). External
+ * content: the index points at products' rows instead of storing the text again. detail=column keeps it small and
+ * still supports single-word and prefix matches with per-column weights.
+ */
+export const PACK_FTS_SQL = `create virtual table products_fts using fts5(
+  name, brand, content = 'products', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2', detail = 'column'
+)`;
 
 /** A column index for each column the build reads, from the export's header line. */
 export function headerIndex(headerLine: string): Map<string, number> {
@@ -111,10 +107,6 @@ const amount = (v: string | undefined): number => {
   return Number.isFinite(n) && n >= 0 ? n : Number.NaN;
 };
 const round2 = (n: number) => Math.round(n * 100) / 100;
-const optional = (v: string | undefined): number | null => {
-  const n = amount(v);
-  return Number.isFinite(n) ? round2(n) : null;
-};
 
 export function packProductFromRow(row: OffRow): PackProduct | null {
   const barcode = (row.code ?? '').replace(/\D/g, '');
@@ -140,26 +132,7 @@ export function packProductFromRow(row: OffRow): PackProduct | null {
 
   const categories = (row.categories_tags ?? '').split(',').filter(Boolean);
   const unit = detectBaseUnit('', row.serving_size, '', row.quantity, categories);
-  const serving = parseOffServing(row.serving_size, row.serving_quantity, '', unit);
-
-  const salt = optional(row.salt_100g) ?? (Number.isFinite(amount(row.sodium_100g)) ? round2(amount(row.sodium_100g) * 2.5) : null);
   const scans = Math.max(0, Math.floor(Number(row.unique_scans_n) || 0));
 
-  return {
-    barcode,
-    name,
-    brand,
-    unit,
-    kcal,
-    protein,
-    carbs,
-    fat,
-    fiber: optional(row.fiber_100g) ?? 0,
-    satFat: optional(row['saturated-fat_100g']),
-    sugars: optional(row.sugars_100g),
-    salt,
-    servingSizes: JSON.stringify(buildOffServingSizes(serving)),
-    micros: JSON.stringify(buildOffMicros(row)),
-    scans,
-  };
+  return { barcode, name, brand, unit, kcal, protein, carbs, fat, scans };
 }

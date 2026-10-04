@@ -8,10 +8,11 @@
  *       [--cap 250000] [--force]
  *
  * Safety: a pack whose product count falls below 90 % of last month's fails the build (exit 2) and last month's file
- * stays live, unless --force. A file over 24 MiB is split into parts (Cloudflare Pages serves at most 25 MiB a file).
+ * stays live, unless --force. Each pack is ONE file of at most 24 MiB (Cloudflare Pages serves 25 MiB a file): the
+ * least-scanned products are left out until it fits, so the phone never joins parts. The search index is built here
+ * (hotfix, 4 Oct: joining and indexing on the phone crashed the app), so the phone only downloads, checks and opens.
  * File names carry the build (`foods-gb-202610-<first 8 of the md5>.db`): the files are cached for a year, so a rebuild
  * within a month never reuses a name.
- * The search index is not in the file: the phone builds it after download, which keeps the download small.
  */
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -21,19 +22,19 @@ import { createGunzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { PACK_COUNTRIES, isPackCountry, type PackCountry } from './countries';
-import { PACK_SCHEMA, PACK_TABLE_SQL, headerIndex, packProductFromRow, readRow, soldIn, type PackProduct } from './packRow';
+import { PACK_FTS_SQL, PACK_SCHEMA, PACK_TABLE_SQL, headerIndex, packProductFromRow, readRow, soldIn, type PackProduct } from './packRow';
 
 export const OFF_EXPORT_URL = 'https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz';
 export const USER_AGENT = 'Tolla/1.1 (support@tolla.co.uk)';
-/** Cloudflare Pages' per-file limit is 25 MiB; parts stay under this. */
-export const PART_BYTES = 24 * 1024 * 1024;
+/** Cloudflare Pages' per-file limit is 25 MiB; every pack fits under this, in one file. */
+export const MAX_FILE_BYTES = 24 * 1024 * 1024;
 export const MIN_RATIO = 0.9;
 
 export type ManifestFile = { name: string; bytes: number; md5: string };
 export type ManifestPack = { month: string; products: number; bytes: number; md5: string; files: ManifestFile[] };
 export type Manifest = { schema: number; generated: string; source: string; licence: string; packs: Record<string, ManifestPack> };
 
-type Args = { countries: PackCountry[]; out: string; source: string; month: string; cap: number; force: boolean };
+type Args = { countries: PackCountry[]; out: string; source: string; month: string; cap: number; force: boolean; maxBytes?: number };
 
 function parseArgs(argv: string[]): Args {
   const get = (flag: string) => {
@@ -74,20 +75,24 @@ function capByScans(db: DatabaseSync, cap: number): number {
   return total - cap;
 }
 
-function splitIntoParts(path: string, baseName: string, out: string): ManifestFile[] {
-  const buf = readFileSync(path);
-  if (buf.length <= PART_BYTES) {
-    return [{ name: baseName, bytes: buf.length, md5: md5Of(buf) }];
+/** Builds the search index and compacts the file. */
+function finish(db: DatabaseSync): void {
+  db.exec("insert into products_fts (products_fts) values ('rebuild')");
+  db.exec('vacuum');
+}
+
+/** Leaves out the least-scanned products, 5 % at a time, until the file fits in one piece. Returns how many went. */
+function fitToSize(db: DatabaseSync, path: string, maxBytes: number): number {
+  let dropped = 0;
+  for (let round = 0; readFileSync(path).length > maxBytes; round++) {
+    if (round > 40) throw new Error('the pack could not be made small enough');
+    const n = Number((db.prepare('select count(*) as n from products').get() as { n: number }).n);
+    const drop = Math.max(1, Math.ceil(n * 0.05));
+    db.exec(`delete from products where id in (select id from products order by scans asc, id desc limit ${drop})`);
+    dropped += drop;
+    finish(db);
   }
-  rmSync(path);
-  const files: ManifestFile[] = [];
-  for (let off = 0, n = 1; off < buf.length; off += PART_BYTES, n++) {
-    const part = buf.subarray(off, Math.min(off + PART_BYTES, buf.length));
-    const name = `${baseName}.part${n}`;
-    writeFileSync(join(out, name), part);
-    files.push({ name, bytes: part.length, md5: md5Of(part) });
-  }
-  return files;
+  return dropped;
 }
 
 export async function buildFoodPacks(args: Args): Promise<Manifest> {
@@ -104,10 +109,10 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     const db = new DatabaseSync(path);
     db.exec('pragma journal_mode = off; pragma synchronous = off;');
     db.exec(PACK_TABLE_SQL);
+    db.exec(PACK_FTS_SQL);
     db.exec('create table meta (key text primary key, value text not null)');
-    const insert = db.prepare(`insert or ignore into products
-      (barcode, name, brand, unit, kcal, protein, carbs, fat, fiber, sat_fat, sugars, salt, serving_sizes, micros, scans)
-      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const insert = db.prepare(`insert or ignore into products (barcode, name, brand, unit, kcal, protein, carbs, fat, scans)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     db.exec('begin');
     dbs.set(c, { db, insert, path, kept: 0 });
   }
@@ -133,8 +138,7 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
       if (product === undefined) product = packProductFromRow(row);
       if (!product) { rejected++; break; }
       t.insert.run(product.barcode, product.name, product.brand, product.unit, product.kcal, product.protein,
-        product.carbs, product.fat, product.fiber, product.satFat, product.sugars, product.salt, product.servingSizes,
-        product.micros, product.scans);
+        product.carbs, product.fat, product.scans);
       t.kept++;
       if (t.kept % 10_000 === 0) { t.db.exec('commit'); t.db.exec('begin'); }
     }
@@ -153,12 +157,14 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
   const built: string[] = [];
   for (const [c, t] of dbs) {
     t.db.exec('commit');
-    const dropped = capByScans(t.db, args.cap);
+    const capped = capByScans(t.db, args.cap);
+    finish(t.db);
+    const trimmed = fitToSize(t.db, t.path, args.maxBytes ?? MAX_FILE_BYTES);
+    const dropped = capped + trimmed;
     const products = Number((t.db.prepare('select count(*) as n from products').get() as { n: number }).n);
     const meta = t.db.prepare('insert into meta (key, value) values (?, ?)');
     for (const [k, v] of [['schema', String(PACK_SCHEMA)], ['country', c], ['month', args.month], ['products', String(products)],
       ['source', 'Open Food Facts (ODbL 1.0)'], ['generated', manifest.generated]]) meta.run(k, v);
-    t.db.exec('vacuum');
     t.db.close();
 
     const last = previous?.packs?.[c];
@@ -176,10 +182,10 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     if (existsSync(finalPath)) rmSync(finalPath);
     writeFileSync(finalPath, whole);
     rmSync(t.path);
-    const files = splitIntoParts(finalPath, baseName, args.out);
-    built.push(...files.map((f) => f.name));
+    const files: ManifestFile[] = [{ name: baseName, bytes: whole.length, md5: wholeMd5 }];
+    built.push(baseName);
     manifest.packs[c] = { month: args.month, products, bytes: whole.length, md5: wholeMd5, files };
-    console.log(`${c}: ${products} products${dropped ? ` (${dropped} least-scanned left out)` : ''}, ${(whole.length / 1048576).toFixed(1)} MB in ${files.length} file(s)`);
+    console.log(`${c}: ${products} products${dropped ? ` (${dropped} least-scanned left out)` : ''}, ${(whole.length / 1048576).toFixed(1)} MB in one file`);
   }
   console.log(`read ${rows} export rows; ${rejected} in-country rows rejected (incomplete or impossible nutrition, bad barcode, no name)`);
   if (failures.length > 0) {

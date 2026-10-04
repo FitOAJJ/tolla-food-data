@@ -45,6 +45,13 @@ jobs:
       - name: Build
         run: npx --yes tsx@4.23.1 tools/food-pack/buildFoodPack.ts --countries gb --out public ${{ inputs.force && '--force' || '' }}
 
+      # Opens each new pack with the phone's own SQLite version (expo-sqlite bundles 3.49.1) and runs the app's
+      # queries; a pack the phone can't read stops here, before anything is published.
+      - name: Check the packs with the phone's SQLite
+        run: |
+          npm install --no-save --no-package-lock --silent @sqlite.org/sqlite-wasm@3.49.1-build4
+          node tools/food-pack/verifyPack.mjs public/manifest.json
+
       - name: Site files
         run: cp site/index.html site/_headers public/
 
