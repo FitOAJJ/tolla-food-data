@@ -135,8 +135,8 @@ export function packProductFromRow(row: OffRow): PackProduct | null {
   const protein = round2(p);
   const carbs = round2(c);
   const fat = round2(f);
+  // All zeros is a real label (water, diet drinks, black coffee): kept, as the scan path keeps it.
   const kcal = sanitizeCalories(declared, protein, carbs, fat);
-  if (kcal <= 0 && protein + carbs + fat <= 0) return null;
 
   const categories = (row.categories_tags ?? '').split(',').filter(Boolean);
   const unit = detectBaseUnit('', row.serving_size, '', row.quantity, categories);

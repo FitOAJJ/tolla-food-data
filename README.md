@@ -9,7 +9,7 @@ Packaged-food nutrition, built once a month from [Open Food Facts](https://world
 - `site/`: the two small files published with the packs.
 - `.github/workflows/food-packs.yml`: the monthly build. It publishes this month's files on the `pages` branch, which Cloudflare Pages serves at `https://foods.tolla.co.uk`, and keeps every month as a release.
 
-What the app downloads: one SQLite file per country (`foods-gb-YYYYMM.db`, split into parts over 24 MiB) and `manifest.json` (month, product count, size, checksum).
+What the app downloads: one SQLite file per country (`foods-gb-YYYYMM-<build>.db`, where the build is the first 8 characters of its md5, split into parts over 24 MiB) and `manifest.json` (month, product count, size, checksum). The files are cached for a year, so every build gets new names.
 
 Run it yourself (Node 24): `npx tsx tools/food-pack/buildFoodPack.ts --countries gb --out public`. It downloads the full export (about 1.28 GB).
 

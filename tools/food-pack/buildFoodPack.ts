@@ -9,6 +9,8 @@
  *
  * Safety: a pack whose product count falls below 90 % of last month's fails the build (exit 2) and last month's file
  * stays live, unless --force. A file over 24 MiB is split into parts (Cloudflare Pages serves at most 25 MiB a file).
+ * File names carry the build (`foods-gb-202610-<first 8 of the md5>.db`): the files are cached for a year, so a rebuild
+ * within a month never reuses a name.
  * The search index is not in the file: the phone builds it after download, which keeps the download small.
  */
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -147,6 +149,8 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     packs: { ...(previous?.packs ?? {}) },
   };
   const failures: string[] = [];
+  /** This build's files: everything else of these countries is removed once the manifest is written. */
+  const built: string[] = [];
   for (const [c, t] of dbs) {
     t.db.exec('commit');
     const dropped = capByScans(t.db, args.cap);
@@ -165,16 +169,16 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     }
     if (products === 0) { failures.push(`${c}: no products`); rmSync(t.path); continue; }
 
-    // This month's file(s) replace the country's older ones.
-    for (const f of readdirSync(args.out)) if (f.startsWith(`foods-${c}-`) && !f.startsWith(`foods-${c}-${stamp}`)) rmSync(join(args.out, f));
-    const baseName = `foods-${c}-${stamp}.db`;
+    const whole = readFileSync(t.path);
+    const wholeMd5 = md5Of(whole);
+    const baseName = `foods-${c}-${stamp}-${wholeMd5.slice(0, 8)}.db`;
     const finalPath = join(args.out, baseName);
     if (existsSync(finalPath)) rmSync(finalPath);
-    writeFileSync(finalPath, readFileSync(t.path));
+    writeFileSync(finalPath, whole);
     rmSync(t.path);
-    const whole = readFileSync(finalPath);
     const files = splitIntoParts(finalPath, baseName, args.out);
-    manifest.packs[c] = { month: args.month, products, bytes: whole.length, md5: md5Of(whole), files };
+    built.push(...files.map((f) => f.name));
+    manifest.packs[c] = { month: args.month, products, bytes: whole.length, md5: wholeMd5, files };
     console.log(`${c}: ${products} products${dropped ? ` (${dropped} least-scanned left out)` : ''}, ${(whole.length / 1048576).toFixed(1)} MB in ${files.length} file(s)`);
   }
   console.log(`read ${rows} export rows; ${rejected} in-country rows rejected (incomplete or impossible nutrition, bad barcode, no name)`);
@@ -183,6 +187,10 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     throw Object.assign(new Error(`build stopped: ${failures.join('; ')}`), { exitCode: 2 });
   }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  // Only now, with every country passed and the manifest written: this month's files replace the older ones.
+  for (const c of args.countries) {
+    for (const f of readdirSync(args.out)) if (f.startsWith(`foods-${c}-`) && !built.includes(f)) rmSync(join(args.out, f));
+  }
   return manifest;
 }
 
