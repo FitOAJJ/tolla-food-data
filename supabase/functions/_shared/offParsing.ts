@@ -159,16 +159,56 @@ export function parseOffServing(
   return { amount, unit, label, count: count > 0 ? count : 1 };
 }
 
+/** The largest pack offered as a portion: a 2 l bottle yes, a 5 kg sack of rice no. */
+export const MAX_PACK_PORTION = 2000;
+
+/**
+ * The pack's size in the food's base unit (Batch D3, B, 5 Oct), for a "1 pack" portion when the label gives no
+ * serving: OFF's numeric `product_quantity` with its unit, else the `quantity` text ("500 ml", "0,5 l", "33 cl",
+ * "400 g", "1 kg"). Null for a multipack ("6 x 330 ml": which one is the portion?), a size in the other unit, an
+ * unclear one, or one over MAX_PACK_PORTION.
+ */
+export function parsePackSize(
+  quantity: unknown,
+  productQuantity: unknown,
+  productQuantityUnit: unknown,
+  baseUnit: 'g' | 'ml',
+): number | null {
+  const text = typeof quantity === 'string' ? quantity.trim().toLowerCase() : '';
+  // A multipack in any spelling ("6 x 330 ml", "4 * 125 g", "6 pack 330ml", "pack of 4", "multipack"): no one portion.
+  if (/\d\s*[x×*]\s*\d|\b([2-9]|\d{2,})\s*-?\s*(pack|pk)s?\b|\bpack of\b|multi-?pack/.test(text)) return null;
+  const ok = (n: number) => {
+    const r = Math.round(n * 100) / 100;
+    return Number.isFinite(r) && r > 0 && r <= MAX_PACK_PORTION ? r : null;
+  };
+
+  const unitField = typeof productQuantityUnit === 'string' ? productQuantityUnit.trim().toLowerCase() : '';
+  const qty = toAmount(productQuantity);
+  if (qty != null && (unitField === 'g' || unitField === 'ml')) return unitField === baseUnit ? ok(qty) : null;
+
+  // "1,000 g" and "1.000 g" are a thousand (review, 5 Oct), "0,5 l" and "1.5l" a decimal.
+  const m = text.match(/(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*(kg|g|ml|cl|l)\b/);
+  if (!m) return null;
+  const thousands = /^[1-9]\d{0,2}(?:[.,]\d{3})+$/.test(m[1]);
+  const n = Number(thousands ? m[1].replace(/[.,]/g, '') : m[1].replace(',', '.'));
+  const [unit, factor] = ({ kg: ['g', 1000], g: ['g', 1], ml: ['ml', 1], cl: ['ml', 10], l: ['ml', 1000] } as const)[m[2] as 'kg' | 'g' | 'ml' | 'cl' | 'l'];
+  return unit === baseUnit ? ok(n * factor) : null;
+}
+
 /**
  * OffServing → the catalog's `serving_sizes` JSONB convention
  * (`fdcPortions.buildServingSizes` sets it): the g/oz base pair always present
  * (ml base for drinks), `"serving"` = the total declared serving, and the
  * household measure as grams-per-ONE ("2 biscuits (33g)" → biscuit: 16.5).
  */
-export function buildOffServingSizes(serving: OffServing): Record<string, number> {
+export function buildOffServingSizes(serving: OffServing, packSize: number | null = null): Record<string, number> {
   const out: Record<string, number> =
     serving.unit === 'ml' ? { ml: 100 } : { g: 100, oz: 28.35 };
-  if (serving.amount == null) return out;
+  if (serving.amount == null) {
+    // No serving on the label, but a pack size ("500 ml"): one pack is a portion (Batch D3, B).
+    if (packSize != null) out.pack = packSize;
+    return out;
+  }
 
   const round = (n: number) => Math.round(n * 100) / 100;
   out.serving = round(serving.amount);
@@ -330,10 +370,36 @@ export function sanitizeProductName(rawName: unknown, brand?: string | null): st
   // Compared accent-FOLDED: OFF routinely has "Nestle …" names under the brand
   // "Nestlé", and a byte-wise compare let the duplication through. Latin
   // accents fold 1:1, so slicing the original by the brand's length is safe.
-  const b = brand?.trim();
-  if (b && fold(s).startsWith(fold(b))) {
+  // A whole word only (Batch D3, 5 Oct): "Tescos Finest Soup" under the brand Tesco used to become "s Finest Soup".
+  // The brand must be followed by a separator; "Tesco's" and "Tescos" keep their names whole.
+  // Both in the same Unicode form, so the brand's length slices the name where the brand ends (review, 5 Oct).
+  s = s.normalize('NFC');
+  const b = brand?.trim().normalize('NFC');
+  if (b && fold(s).startsWith(fold(b)) && /^[\s\-–—:,]/.test(s.slice(b.length))) {
     const rest = s.slice(b.length).replace(/^[\s\-–—:,]+/, '');
     if (rest.length >= 3) s = rest;
+  }
+
+  // 2b — repeated segments collapse to one (Batch D3): "Smoked streaky bacon - Asda - Asda - Asda" → "Smoked streaky
+  // bacon - Asda". Compared accent-folded and case-blind; only neighbours repeat; the dashes between are kept. When the
+  // raw name ran past the 120-character limit, a last segment that is the start of the one before it ("… - Asda - Asd")
+  // is the cut, so it goes too. The brand always stays once.
+  // A cut that landed just after a dash leaves "… - Asda -": that dangling separator goes first.
+  const pieces = s.replace(/\s+[-–—]\s*$/, '').split(/(\s+[-–—]\s+)/);
+  if (pieces.length > 1) {
+    const segs: Array<{ sep: string; text: string }> = [{ sep: '', text: pieces[0] }];
+    for (let i = 1; i < pieces.length; i += 2) segs.push({ sep: pieces[i], text: pieces[i + 1] ?? '' });
+    const kept: typeof segs = [];
+    for (const seg of segs) {
+      const prev = kept[kept.length - 1];
+      if (prev !== undefined && fold(seg.text.trim()) === fold(prev.text.trim())) continue;
+      kept.push(seg);
+    }
+    const last = kept[kept.length - 1];
+    const before = kept[kept.length - 2];
+    if (rawName.length > MAX_CATALOG_NAME && before !== undefined && last.text.trim().length < before.text.trim().length
+      && fold(before.text.trim()).startsWith(fold(last.text.trim()))) kept.pop();
+    if (kept.length < segs.length) s = kept.map((seg) => seg.sep + seg.text).join('');
   }
 
   // Tidy what the edits left behind: doubled separators, stray edge punctuation.
