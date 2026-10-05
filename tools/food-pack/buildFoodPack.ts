@@ -11,6 +11,7 @@
  * stays live, unless --force. Each pack is ONE file of at most 24 MiB (Cloudflare Pages serves 25 MiB a file): the
  * least-scanned products are left out until it fits, so the phone never joins parts. The search index is built here
  * (hotfix, 4 Oct: joining and indexing on the phone crashed the app), so the phone only downloads, checks and opens.
+ * Since Batch UK2 (5 Oct) it is a plain word index (packWords.ts), not FTS5: the phone's first FTS5 search crashed it.
  * File names carry the build (`foods-gb-202610-<first 8 of the md5>.db`): the files are cached for a year, so a rebuild
  * within a month never reuses a name.
  */
@@ -22,7 +23,8 @@ import { createGunzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { PACK_COUNTRIES, isPackCountry, type PackCountry } from './countries';
-import { PACK_FTS_SQL, PACK_SCHEMA, PACK_TABLE_SQL, headerIndex, packProductFromRow, readRow, soldIn, type PackProduct } from './packRow';
+import { PACK_SCHEMA, PACK_TABLE_SQL, headerIndex, packProductFromRow, readRow, soldIn, type PackProduct } from './packRow';
+import { PACK_POSTINGS_SQL, PACK_VOCAB_SQL, productWords } from '../../src/features/nutrition/foodPack/packWords';
 
 export const OFF_EXPORT_URL = 'https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz';
 export const USER_AGENT = 'Tolla/1.1 (support@tolla.co.uk)';
@@ -75,10 +77,43 @@ function capByScans(db: DatabaseSync, cap: number): number {
   return total - cap;
 }
 
-/** Builds the search index and compacts the file. */
+/** Builds the word index from the products that are left: each word once in vocab, each product it's in in postings. */
+function indexWords(db: DatabaseSync): void {
+  db.exec('delete from postings; delete from vocab;');
+  const ids = new Map<string, number>();
+  const addWord = db.prepare('insert into vocab (word, id) values (?, ?)');
+  const addPosting = db.prepare('insert into postings (word_id, product_id, in_name) values (?, ?, ?)');
+  db.exec('begin');
+  for (const p of db.prepare('select id, name, brand from products').iterate() as Iterable<{ id: number; name: string; brand: string | null }>) {
+    for (const [word, inName] of productWords(p.name, p.brand)) {
+      let id = ids.get(word);
+      if (id === undefined) {
+        id = ids.size + 1;
+        ids.set(word, id);
+        addWord.run(word, id);
+      }
+      addPosting.run(id, p.id, inName);
+    }
+  }
+  db.exec('commit');
+}
+
+/** Builds the word index and compacts the file. */
 function finish(db: DatabaseSync): void {
-  db.exec("insert into products_fts (products_fts) values ('rebuild')");
+  indexWords(db);
   db.exec('vacuum');
+}
+
+/** Stops the build if the file or the word index isn't sound (every posting points at a word and a product). */
+function checkPack(db: DatabaseSync, c: string): void {
+  const one = (sql: string) => Object.values(db.prepare(sql).get() as Record<string, unknown>)[0];
+  const integrity = one('pragma integrity_check');
+  if (integrity !== 'ok') throw new Error(`${c}: integrity check: ${String(integrity)}`);
+  const orphans = Number(one(`select count(*) from postings x where not exists (select 1 from products p where p.id = x.product_id)
+    or not exists (select 1 from vocab v where v.id = x.word_id)`));
+  if (orphans !== 0) throw new Error(`${c}: ${orphans} index entries point at nothing`);
+  const dupes = Number(one('select count(*) - count(distinct id) from vocab'));
+  if (dupes !== 0) throw new Error(`${c}: ${dupes} repeated word ids`);
 }
 
 /** Leaves out the least-scanned products, 5 % at a time, until the file fits in one piece. Returns how many went. */
@@ -109,7 +144,8 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     const db = new DatabaseSync(path);
     db.exec('pragma journal_mode = off; pragma synchronous = off;');
     db.exec(PACK_TABLE_SQL);
-    db.exec(PACK_FTS_SQL);
+    db.exec(PACK_VOCAB_SQL);
+    db.exec(PACK_POSTINGS_SQL);
     db.exec('create table meta (key text primary key, value text not null)');
     const insert = db.prepare(`insert or ignore into products (barcode, name, brand, unit, kcal, protein, carbs, fat, scans)
       values (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -150,7 +186,8 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     generated: new Date().toISOString(),
     source: 'Open Food Facts export',
     licence: 'ODbL 1.0 (https://opendatacommons.org/licenses/odbl/1-0/)',
-    packs: { ...(previous?.packs ?? {}) },
+    // Packs from an older schema aren't carried over: the app version that reads them is a different one.
+    packs: previous?.schema === PACK_SCHEMA ? { ...previous.packs } : {},
   };
   const failures: string[] = [];
   /** This build's files: everything else of these countries is removed once the manifest is written. */
@@ -160,8 +197,7 @@ export async function buildFoodPacks(args: Args): Promise<Manifest> {
     const capped = capByScans(t.db, args.cap);
     finish(t.db);
     const trimmed = fitToSize(t.db, t.path, args.maxBytes ?? MAX_FILE_BYTES);
-    // A stale or broken index fails here ("database disk image is malformed") and stops the build.
-    t.db.exec("insert into products_fts (products_fts, rank) values ('integrity-check', 1)");
+    checkPack(t.db, c);
     const dropped = capped + trimmed;
     const products = Number((t.db.prepare('select count(*) as n from products').get() as { n: number }).n);
     const meta = t.db.prepare('insert into meta (key, value) values (?, ?)');

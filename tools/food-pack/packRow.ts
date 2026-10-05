@@ -21,8 +21,10 @@ import { gtinCheckDigitOk } from '../../supabase/functions/_shared/foodLookup';
 /**
  * Bump when the pack's table changes; the app ignores a pack whose schema it doesn't know. 2 (hotfix, 4 Oct): slim
  * columns and the search index built here, not on the phone (schema 1's on-phone join and index build crashed the app).
+ * 3 (Batch UK2, 5 Oct): a plain word index (vocab + postings, src/features/nutrition/foodPack/packWords.ts) in place of
+ * FTS5, whose first search on the phone aborted the app.
  */
-export const PACK_SCHEMA = 2;
+export const PACK_SCHEMA = 3;
 
 /** The export's columns the build reads (it has 211; checked 4 Oct). Everything else is skipped while streaming. */
 export const PACK_COLUMNS = [
@@ -50,7 +52,7 @@ export type PackProduct = {
   scans: number;
 };
 
-/** The table the app reads (a rowid table, so the search index can point into it without copying the text). */
+/** The table the app reads (a rowid table, so the word index points at a product by its small integer id). */
 export const PACK_TABLE_SQL = `create table products (
   id integer primary key,
   barcode text not null unique,
@@ -62,15 +64,6 @@ export const PACK_TABLE_SQL = `create table products (
   carbs real not null,
   fat real not null,
   scans integer not null
-)`;
-
-/**
- * The search index, built by the job (checked readable by SQLite 3.49.1, older than the phone's 3.50.3, 4 Oct). External
- * content: the index points at products' rows instead of storing the text again. detail=column keeps it small and
- * still supports single-word and prefix matches with per-column weights.
- */
-export const PACK_FTS_SQL = `create virtual table products_fts using fts5(
-  name, brand, content = 'products', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2', detail = 'column'
 )`;
 
 /** A column index for each column the build reads, from the export's header line. */

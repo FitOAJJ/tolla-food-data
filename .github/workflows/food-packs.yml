@@ -45,12 +45,13 @@ jobs:
       - name: Build
         run: npx --yes tsx@4.23.1 tools/food-pack/buildFoodPack.ts --countries gb --out public ${{ inputs.force && '--force' || '' }}
 
-      # Checks each new pack's bytes and md5, then opens it with SQLite 3.49.1 (older than the phone's 3.50.3, so the
-      # stricter test) and runs the app's queries; a pack the phone can't read stops here, before anything is published.
+      # Checks each new pack's bytes and md5, then opens it with the phone's own SQLite version (3.50.3) and runs the
+      # app's own search code (src/features/nutrition/foodPack/packWords.ts, which Node runs as TypeScript directly);
+      # a pack the phone can't read stops here, before anything is published.
       - name: Check the packs with the phone's SQLite
         run: |
-          npm install --no-save --no-package-lock --silent @sqlite.org/sqlite-wasm@3.49.1-build4
-          node tools/food-pack/verifyPack.mjs public/manifest.json
+          npm install --no-save --no-package-lock --silent @sqlite.org/sqlite-wasm@3.50.3-build1
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/food-pack/verifyPack.mjs public/manifest.json
 
       - name: Site files
         run: cp site/index.html site/_headers public/
