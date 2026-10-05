@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tolla food data</title>
+<style>
+  :root { color-scheme: light dark; --ink: #1c1d1f; --muted: #5b6068; --bg: #f6f5f2; --line: #d9d6cf; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #ecebe7; --muted: #a3a7ad; --bg: #16171a; --line: #34363b; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px; }
+  h1 { font-size: 1.6rem; margin: 0 0 8px; }
+  p, li { color: var(--muted); }
+  a { color: inherit; }
+  code { font-size: .9em; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 32px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Tolla food data</h1>
+  <p>Packaged-food nutrition for on-phone search in the Tolla app, built once a month from Open Food Facts. The app downloads these files by itself; there is nothing to do here.</p>
+  <ul>
+    <li><a href="manifest.json"><code>manifest.json</code></a>: which packs exist, their month, size and checksum.</li>
+    <li>Build code and monthly releases: <a href="https://github.com/FitOAJJ/tolla-food-data">github.com/FitOAJJ/tolla-food-data</a>.</li>
+  </ul>
+  <hr>
+  <p>Contains information from <a href="https://world.openfoodfacts.org">Open Food Facts</a>, made available under the <a href="https://opendatacommons.org/licenses/odbl/1-0/">Open Database License (ODbL) v1.0</a>; individual contents under the <a href="https://opendatacommons.org/licenses/dbcl/1-0/">Database Contents License</a>. These files are derived from it and are made available under the ODbL v1.0. Product data is crowd-sourced and may contain errors; it is not medical or dietary advice.</p>
+</main>
+</body>
+</html>
